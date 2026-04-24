@@ -1,0 +1,10 @@
+Stuff to do:
+1. make sensors work on the arduino
+2. figure out how to get input from webcam on computer
+3. make sure arduino gives correct outputs
+4. use LEDs for any output we cant simulate e.g contacting security company
+5. user able to interact with code e.g typing in pin
+6. user authentication
+7. timers e.g for automatic arming
+8. facial recognition
+9. storing and recognising "friendly faces"
