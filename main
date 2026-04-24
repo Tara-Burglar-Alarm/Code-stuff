@@ -1,0 +1,75 @@
+
+//global vars(tara will kill me this is just a plasholder)
+bool globalMotionDetected=0;
+bool globalDoorStatus=0;
+bool globalWindowStatus=0;
+
+const int motionSensorPin = #;
+const int doorSensorPin = #;
+const int windowSensorPin = #;
+
+//setup 
+void setup(){
+pinMode(motionSensorPin, INPUT);
+pinMode(doorSensorPin, INPUT);
+pinMode(windowSensorPin, INPUT);
+}
+
+//classes
+class Sensor 
+{
+  public:
+    void detect() 
+    {} 
+};
+
+class MotionSensor: public Sensor 
+{
+  public:
+    void detect() 
+    {
+      globalMotionDetected = digitalRead(motionSensorPin);
+      if (globalMotionDetected == HIGH) 
+      { 
+        Serial.println("Motion detected!");
+      } 
+      else 
+      {
+        Serial.println("No motion.");
+      }
+    }
+};
+
+class doorSensor: public Sensor 
+{
+ public:
+    void detect() 
+    {
+      globalDoorStatus = digitalRead(doorSensorPin);
+      if (globalDoorStatus == HIGH) 
+      { 
+        Serial.println("Door ompen!");
+      } 
+      else 
+      {
+        Serial.println("Door closed.");
+      }
+    }
+};
+
+class windowSensor: public Sensor 
+{
+ public:
+    void detect() 
+    {
+      globalwindowStatus = digitalRead(windowSensorPin);
+      if (globalwindowStatus == HIGH) 
+      { 
+        Serial.println("Window ompen!");
+      } 
+      else 
+      {
+        Serial.println("Window closed.");
+      }
+    }
+};
