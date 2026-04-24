@@ -40,7 +40,7 @@ class MotionSensor: public Sensor
     }
 };
 
-class doorSensor: public Sensor 
+class doorSensor: public Sensor //this is just a switch so high=on low=off
 {
  public:
     void detect() 
@@ -57,7 +57,7 @@ class doorSensor: public Sensor
     }
 };
 
-class windowSensor: public Sensor 
+class windowSensor: public Sensor //this is just a switch so high=on low=off
 {
  public:
     void detect() 
