@@ -1,0 +1,40 @@
+class Alarm {
+
+private:
+
+bool active;
+int buzzerPin;
+int pitch;
+
+public:
+
+Alarm(int startingPitch){
+pitch= startingPitch;
+active=false;
+buzzerPin = 8;
+pinMode(buzzerPin, OUTPUT);
+}
+void activate()
+{
+active=true;
+tone(buzzerPin , pitch);
+}
+void deactivate()
+{
+active=false;
+noTone(buzzerPin);
+}
+
+
+};
+
+Alarm myAlarm(3000);
+
+void setup(){
+myAlarm.activate();
+}
+
+void loop(){
+
+
+}
