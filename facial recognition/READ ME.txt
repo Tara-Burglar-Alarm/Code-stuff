@@ -1,0 +1,4 @@
+pip install opencv-contrib-python numpy
+One thing to be aware of: opencv-contrib-python and opencv-python conflict with each other — if the other system already has opencv-python installed, you'll need to uninstall it first before installing the contrib version:
+pip uninstall opencv-python
+pip install opencv-contrib-python
