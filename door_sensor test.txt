@@ -1,0 +1,30 @@
+// ---------------- DOOR SENSOR ----------------
+
+const int doorSensorPin = 3;
+bool globalDoorStatus = false;
+
+class DoorSensor {
+  public:
+    void detect() {
+      globalDoorStatus = !digitalRead(doorSensorPin);
+    }
+};
+
+DoorSensor door;
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(doorSensorPin, INPUT_PULLUP);
+}
+
+void loop() {
+  door.detect();
+
+  if (globalDoorStatus) {
+    Serial.println("Door open");
+  } else {
+    Serial.println("Door closed");
+  }
+
+  delay(500);
+}
