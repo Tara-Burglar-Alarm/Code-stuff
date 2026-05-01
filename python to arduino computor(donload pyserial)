@@ -1,0 +1,29 @@
+import serial
+import time
+
+# 1. Setup the connection
+# Replace 'COM5' with the port you found in the Arduino IDE
+arduino_port = "COM5" 
+baud_rate = 9600
+
+try:
+    # Initialize the serial connection
+    ser = serial.Serial(arduino_port, baud_rate, timeout=1)
+    time.sleep(2) # Give the Arduino a moment to reset/wake up
+    print(f"Connected to {arduino_port}...")
+
+    # 2. Loop to read data
+    while True:
+        if ser.in_waiting > 0: # If there is data waiting in the buffer
+            # Read the line, decode from bytes to string, and remove extra whitespace
+            data = ser.readline().decode('utf-8').rstrip()
+            print(f"Arduino says: {data}")
+
+except KeyboardInterrupt:
+    print("\nStopping...")
+finally:
+    # 3. Always close the port when done
+    if 'ser' in locals():
+        ser.close()
+        print("Port closed.")
+
