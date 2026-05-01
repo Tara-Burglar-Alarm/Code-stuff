@@ -1,0 +1,21 @@
+int counter = 0;
+
+void setup() {
+  // This MUST match the baud_rate in your Python script
+  Serial.begin(9600); 
+  
+  // A little message to let you know it started
+  Serial.println("Arduino is ready!"); 
+}
+
+void loop() {
+  // Create some data (a counter in this case)
+  counter++;
+
+  // Send the data to the computer
+  Serial.print("Data Point #");
+  Serial.println(counter); 
+
+  // Wait 1 second so it doesn't flood the computer
+  delay(1000); 
+}
