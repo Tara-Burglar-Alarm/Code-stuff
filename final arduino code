@@ -9,6 +9,9 @@ const int buzzerPin        = 6;   // RS Pro piezo buzzer
 const int solenoidPin      = 7;   // BD911 transistor base → Pimoroni COM2700 solenoid
 const int securityLedPin   = 8;   // Security company contact LED
 
+enum status {
+  LOCKED, UNLOCKED 
+};
 
 // ============================================================
 //  GLOBAL STATE
@@ -34,7 +37,11 @@ const unsigned long ENTRY_DELAY = 30000;  // 30s to enter PIN after known face
 enum FaceResult { FACE_NONE, FACE_KNOWN, FACE_UNKNOWN };
 FaceResult lastFaceResult = FACE_NONE;
 
+enum status {
+  LOCKED, UNLOCKED 
+};
 
+windowLock window1;
 
 // ============================================================
 //  SENSORS
@@ -55,6 +62,32 @@ class DoorSensor {
     }
 };
 
+class windowLock
+{
+  private:
+    enum status lockStatus;
+    int pinNum;
+  public:
+    void lockWindow(){
+      digitalWrite(pinNum, HIGH);
+      enum status lockStatus = LOCKED;
+    }
+    void unlockWindow(){
+      digitalWrite(pinNum, LOW);
+      enum status lockStatus = UNLOCKED;
+    }
+    void pin (int pin){
+      pinNum = pin;
+      pinMode(pin, OUTPUT);
+      digitalWrite(pin, LOW);
+      enum status lockStatus = UNLOCKED;
+    }
+    void printStatus(){
+      Serial.print("Status: ");
+      Serial.print(lockStatus);
+      Serial.print('\n');
+    }
+};
 
 // ============================================================
 //  OUTPUTS
@@ -123,7 +156,7 @@ class Controller {
     void finishArming() {
       systemArmed      = true;
       exitDelayActive  = false;
-      solenoid.lock();
+      window1.lockWindow();
       Serial.println("System armed and locked.");
     }
 
@@ -135,7 +168,7 @@ class Controller {
       lastFaceResult    = FACE_NONE;
       alarm.off();
       alarm.clearSecurity();
-      solenoid.unlock();
+      window1.unlockWindow();
       Serial.println("System disarmed and unlocked.");
     }
 
@@ -300,6 +333,7 @@ void setup() {
   Serial.println("System ready.");
   delay(3000);        // wait 3s for Python to connect and send READY
   systemStarted = true; // start regardless — don't rely on Python READY timing
+  window1.pin(7);
 }
 
 void loop() {
