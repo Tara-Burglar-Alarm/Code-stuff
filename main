@@ -1,75 +1,392 @@
+// ============================================================
+//  PINS
+// ============================================================
 
-//global vars(tara will kill me this is just a plasholder)
-bool globalMotionDetected=0;
-bool globalDoorStatus=0;
-bool globalWindowStatus=0;
+const int motionSensorPin  = 2;   // HC-SR505 PIR
+const int doorSensorPin    = 3;   // RS Pro door/window switch (INPUT_PULLUP)
 
-const int motionSensorPin = #;
-const int doorSensorPin = #;
-const int windowSensorPin = #;
+const int buzzerPin        = 6;   // RS Pro piezo buzzer
+const int securityLedPin   = 8;   // Security company contact LED
+const int solenoidPin      = 7;
 
-//setup 
-void setup(){
-pinMode(motionSensorPin, INPUT);
-pinMode(doorSensorPin, INPUT);
-pinMode(windowSensorPin, INPUT);
+// ============================================================
+//  GLOBAL STATE
+// ============================================================
+
+class controller;
+
+/*bool systemArmed        = true;
+bool systemStarted      = true;
+bool alarmActive        = false;
+
+bool exitDelayActive    = false;
+bool entryDelayActive   = false;
+
+bool motionHandled      = false;   // prevents re-triggering while PIR stays HIGH (~8s)
+bool prevMotionState    = false;
+bool prevDoorState      = false;   // edge detection for door sensor
+
+unsigned long exitStartTime  = 0;
+unsigned long entryStartTime = 0;
+
+const unsigned long EXIT_DELAY  = 60000;  // 60s to leave after arming
+const unsigned long ENTRY_DELAY = 30000;  // 30s to enter PIN after known face (ALL THESE ARE NOW PRIVATE VARIABLES IN CONTROLLER)*/ 
+
+enum FaceResult { FACE_NONE, FACE_KNOWN, FACE_UNKNOWN };
+
+enum status {
+  LOCKED, UNLOCKED 
+};
+
+class Peripheral {
+  protected:
+    int pinNum;
+  public:
+    void pin (int pin){
+      pinNum = pin;
+    }
+};
+
+// ============================================================
+//  SENSORS
+// ============================================================
+
+class MotionSensor {
+  public:
+    bool read() {
+      return digitalRead(motionSensorPin) == HIGH;
+    }
+};
+
+class DoorSensor {
+  public:
+    bool read() {
+      // INPUT_PULLUP: LOW = door open (triggered)
+      return digitalRead(doorSensorPin) == HIGH;
+    }
+};
+
+class windowLock : public Peripheral
+{
+  private:
+    enum status lockStatus;
+  public:
+    void lockWindow(){
+      digitalWrite(pinNum, HIGH);
+      Serial.print("LOCKED");
+      lockStatus = LOCKED;
+    }
+    void unlockWindow(){
+      digitalWrite(pinNum, LOW);
+      Serial.print("UNLOCKED");
+      lockStatus = UNLOCKED;
+    }
+    void setPin(){
+      pinMode(pinNum, OUTPUT);
+      digitalWrite(pinNum, LOW);
+      Serial.print("UNLOCKED");
+      lockStatus = UNLOCKED;
+    }
+    void printStatus(){
+      Serial.print("Status: ");
+      Serial.print(lockStatus);
+      Serial.print('\n');
+    }
+};
+
+
+// ============================================================
+//  OUTPUTS
+// ============================================================
+
+class Alarm {
+  public:
+    void on() {
+      digitalWrite(buzzerPin, HIGH);
+      Serial.println("ALARM ON");
+      contactSecurity();
+    }
+
+    void off() {
+      digitalWrite(buzzerPin, LOW);
+      Serial.println("ALARM OFF");
+    }
+
+    void contactSecurity() {
+      digitalWrite(securityLedPin, HIGH);
+      Serial.println("SECURITY CONTACTED");
+      // LED stays on until system is disarmed
+    }
+
+    void clearSecurity() {
+      digitalWrite(securityLedPin, LOW);
+    }
+};
+
+// ============================================================
+//  CONTROLLER
+// ============================================================
+
+class Controller {
+  private:
+    bool systemArmed;
+    bool systemStarted;
+    bool alarmActive;
+
+    bool exitDelayActive;
+    bool entryDelayActive;
+
+    bool motionHandled;  // prevents re-triggering while PIR stays HIGH (~8s)
+    bool prevMotionState;
+    bool prevDoorState;  // edge detection for door sensor
+
+    unsigned long exitStartTime;
+    unsigned long entryStartTime;
+
+    unsigned long EXIT_DELAY;  // 60s to leave after arming
+    unsigned long ENTRY_DELAY;  // 30s to enter PIN after known face
+
+    FaceResult lastFaceResult = FACE_NONE;
+  public:
+    MotionSensor motion;
+    DoorSensor   door;
+    Alarm        alarm;
+    windowLock   window;
+
+
+
+    // --- ARM / DISARM ---
+
+    void armSystem() {
+      Serial.println("Arming... 60 seconds to leave.");
+      exitDelayActive = true;
+      exitStartTime   = millis();
+    }
+
+    void finishArming() {
+      systemArmed      = true;
+      exitDelayActive  = false;
+      window.lockWindow();
+      Serial.println("System armed and locked.");
+    }
+
+    void disarmSystem() {
+      systemArmed       = false;
+      alarmActive       = false;
+      entryDelayActive  = false;
+      motionHandled     = false;
+      lastFaceResult    = FACE_NONE;
+      alarm.off();
+      alarm.clearSecurity();
+      window.unlockWindow();
+      Serial.println("System disarmed and unlocked.");
+    }
+
+    // --- SENSORS ---
+
+    void checkSensors() {
+      bool motionNow = motion.read();
+      bool doorNow   = door.read();
+
+      // Door sensor — trigger once on rising edge only (door opening)
+      if (doorNow && !prevDoorState && !alarmActive && !entryDelayActive) {
+        Serial.println("Door triggered. Checking face...");
+        Serial.println("CHECK_FACE");
+      }
+
+      // PIR — only trigger once per HIGH pulse (PIR stays HIGH ~8s)
+      if (motionNow && !prevMotionState && !motionHandled
+          && !alarmActive && !entryDelayActive) {
+        Serial.println("Motion triggered. Checking face...");
+        Serial.println("CHECK_FACE");
+        motionHandled = true;
+      }
+
+      // Reset handled flags when sensors go LOW again
+      if (!motionNow && prevMotionState) {
+        motionHandled = false;
+      }
+
+      prevMotionState = motionNow;
+      prevDoorState   = doorNow;
+    }
+
+    // --- DELAYS ---
+
+    void handleDelays() {
+      // Exit delay — finish arming after 60s
+      if (exitDelayActive && millis() - exitStartTime >= EXIT_DELAY) {
+        finishArming();
+      }
+
+      // Entry delay — Python has 30s to accept correct PIN
+      if (entryDelayActive && millis() - entryStartTime >= ENTRY_DELAY) {
+        Serial.println("PIN timeout. Triggering alarm.");
+        alarm.on();
+        alarmActive = true;
+        entryDelayActive = false;
+      }
+    }
+
+    // --- SERIAL (messages from Python) ---
+
+    void handleSerial() {
+      if (!Serial.available()) return;
+
+      String msg = Serial.readStringUntil('\n');
+      msg.trim();
+
+      // Python connected and ready
+      if (msg == "READY") {
+        Serial.println("Python connected.");
+        return;
+      }
+
+      // Python sends ARM when user selects arm from menu
+      if (msg == "ARM") {
+        armSystem();
+        return;
+      }
+
+      // Python disarmed via correct PIN in menu
+      if (msg == "DISARMED") {
+        disarmSystem();
+        return;
+      }
+
+      // Python shut down cleanly
+      if (msg == "SHUTDOWN") {
+        disarmSystem();
+        Serial.println("System shutdown.");
+        return;
+      }
+
+      // --- Face results ---
+
+      if (msg == "FACE_OK") {
+        // Known face — open 30s PIN window
+        lastFaceResult   = FACE_KNOWN;
+        entryDelayActive = true;
+        entryStartTime   = millis();
+        Serial.println("Known face. Enter PIN within 30 seconds.");
+        return;
+      }
+
+      if (msg == "FACE_UNKNOWN") {
+        // Unknown face — trigger alarm immediately
+        lastFaceResult = FACE_UNKNOWN;
+        Serial.println("Unknown face! Triggering alarm.");
+        Serial.println("SAVE_FACE");
+        alarm.on();
+        alarmActive = true;
+        return;
+      }
+
+      if (msg == "FACE_NONE") {
+        // Sensor tripped but no face seen — treat as threat
+        lastFaceResult = FACE_NONE;
+        Serial.println("No face after trigger. Triggering alarm.");
+        alarm.on();
+        alarmActive = true;
+        return;
+      }
+
+      // Python PIN entry timed out
+      if (msg == "PIN_TIMEOUT") {
+        Serial.println("PIN timeout (Python). Triggering alarm.");
+        alarm.on();
+        alarmActive = true;
+        entryDelayActive = false;
+        return;
+      }
+
+      // Intruder image saved
+      if (msg == "SAVED") {
+        Serial.println("Intruder image saved.");
+        return;
+      }
+
+      // Menu option 5 — contact security from Python
+      if (msg == "CONTACT_SECURITY") {
+        alarm.contactSecurity();
+        return;
+      }
+
+      // Training / capture status messages
+      if (msg == "TRAINING")       { Serial.println("Training in progress..."); return; }
+      if (msg == "TRAINING_DONE")  { Serial.println("Training complete.");       return; }
+      if (msg == "TRAIN_FAILED")   { Serial.println("Training failed.");         return; }
+      if (msg == "CAPTURE_READY")  { Serial.println("Capture mode open on PC."); return; }
+      if (msg == "CAPTURE_DONE")   { Serial.println("Capture complete.");        return; }
+      if (msg == "ERROR_NO_MODEL") { Serial.println("No model found.");          return; }
+      if (msg == "ERROR_NO_DATASET"){ Serial.println("No dataset found.");       return; }
+    }
+
+    void setPins(){
+      window.pin(7);
+      window.setPin();
+    }
+
+    void armedCheck(){
+      // Sensors only run when armed
+      if (systemStarted && systemArmed) {
+        checkSensors();
+      }
+
+      // Delays run whenever system is started — exit delay happens before systemArmed is true
+      if (systemStarted) {
+        handleDelays();
+      }
+    }
+
+    void systemStart(){// start regardless — don't rely on Python READY timing {
+    systemArmed        = true;
+    systemStarted      = true;
+    alarmActive        = false;
+
+    exitDelayActive    = false;
+    entryDelayActive   = false;
+
+    motionHandled      = false;   // prevents re-triggering while PIR stays HIGH (~8s)
+    prevMotionState    = false;
+    prevDoorState      = false;   // edge detection for door sensor
+
+    exitStartTime  = 0;
+    entryStartTime = 0;
+
+    EXIT_DELAY  = 60000;  // 60s to leave after arming
+    ENTRY_DELAY = 30000;  // 30s to enter PIN after known face
+    }
+};
+
+
+// ============================================================
+//  MAIN
+// ============================================================
+
+Controller controller;
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(motionSensorPin, INPUT);        // HC-SR505: no pull-up needed
+  pinMode(doorSensorPin,   INPUT_PULLUP); // RS Pro switch: LOW = triggered
+
+  pinMode(buzzerPin,       OUTPUT);
+  pinMode(securityLedPin,  OUTPUT);
+
+  digitalWrite(buzzerPin,      LOW);
+  digitalWrite(securityLedPin, LOW);
+
+  Serial.println("System ready.");
+  //delay(3000);        // wait 3s for Python to connect and send READY
+  controller.systemStart(); // start regardless — don't rely on Python READY timing
+  delay(3000);        // wait 3s for Python to connect and send READY
 }
 
-//classes
-class Sensor 
-{
-  public:
-    void detect() 
-    {} 
-};
+void loop() {
+  controller.handleSerial();
+  controller.armedCheck();
 
-class MotionSensor: public Sensor 
-{
-  public:
-    void detect() 
-    {
-      globalMotionDetected = digitalRead(motionSensorPin);
-      if (globalMotionDetected == HIGH) 
-      { 
-        Serial.println("Motion detected!");
-      } 
-      else 
-      {
-        Serial.println("No motion.");
-      }
-    }
-};
-
-class doorSensor: public Sensor //this is just a switch so high=on low=off
-{
- public:
-    void detect() 
-    {
-      globalDoorStatus = digitalRead(doorSensorPin);
-      if (globalDoorStatus == HIGH) 
-      { 
-        Serial.println("Door ompen!");
-      } 
-      else 
-      {
-        Serial.println("Door closed.");
-      }
-    }
-};
-
-class windowSensor: public Sensor //this is just a switch so high=on low=off
-{
- public:
-    void detect() 
-    {
-      globalwindowStatus = digitalRead(windowSensorPin);
-      if (globalwindowStatus == HIGH) 
-      { 
-        Serial.println("Window ompen!");
-      } 
-      else 
-      {
-        Serial.println("Window closed.");
-      }
-    }
-};
+  delay(100);
+}
