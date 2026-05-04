@@ -1,0 +1,318 @@
+// ============================================================
+//  PINS
+// ============================================================
+
+const int motionSensorPin  = 2;   // HC-SR505 PIR
+const int doorSensorPin    = 3;   // RS Pro door/window switch (INPUT_PULLUP)
+
+const int buzzerPin        = 6;   // RS Pro piezo buzzer
+const int solenoidPin      = 7;   // BD911 transistor base → Pimoroni COM2700 solenoid
+const int securityLedPin   = 8;   // Security company contact LED
+
+
+// ============================================================
+//  GLOBAL STATE
+// ============================================================
+
+bool systemArmed        = true;
+bool systemStarted      = true;
+bool alarmActive        = false;
+
+bool exitDelayActive    = false;
+bool entryDelayActive   = false;
+
+bool motionHandled      = false;   // prevents re-triggering while PIR stays HIGH (~8s)
+bool prevMotionState    = false;
+bool prevDoorState      = false;   // edge detection for door sensor
+
+unsigned long exitStartTime  = 0;
+unsigned long entryStartTime = 0;
+
+const unsigned long EXIT_DELAY  = 60000;  // 60s to leave after arming
+const unsigned long ENTRY_DELAY = 30000;  // 30s to enter PIN after known face
+
+enum FaceResult { FACE_NONE, FACE_KNOWN, FACE_UNKNOWN };
+FaceResult lastFaceResult = FACE_NONE;
+
+
+// ============================================================
+//  SENSORS
+// ============================================================
+
+class MotionSensor {
+  public:
+    bool read() {
+      return digitalRead(motionSensorPin) == HIGH;
+    }
+};
+
+class DoorSensor {
+  public:
+    bool read() {
+      // INPUT_PULLUP: LOW = door open (triggered)
+      return digitalRead(doorSensorPin) == HIGH;
+    }
+};
+
+
+// ============================================================
+//  OUTPUTS
+// ============================================================
+
+class Alarm {
+  public:
+    void on() {
+      digitalWrite(buzzerPin, HIGH);
+      alarmActive = true;
+      Serial.println("ALARM ON");
+      contactSecurity();
+    }
+
+    void off() {
+      digitalWrite(buzzerPin, LOW);
+      alarmActive = false;
+      Serial.println("ALARM OFF");
+    }
+
+    void contactSecurity() {
+      digitalWrite(securityLedPin, HIGH);
+      Serial.println("SECURITY CONTACTED");
+      // LED stays on until system is disarmed
+    }
+
+    void clearSecurity() {
+      digitalWrite(securityLedPin, LOW);
+    }
+};
+
+class Solenoid {
+  public:
+    void lock() {
+      // Energise solenoid via BD911 transistor to lock door
+      digitalWrite(solenoidPin, HIGH);
+      Serial.println("LOCKED");
+    }
+
+    void unlock() {
+      digitalWrite(solenoidPin, LOW);
+      Serial.println("UNLOCKED");
+    }
+};
+
+
+// ============================================================
+//  CONTROLLER
+// ============================================================
+
+class Controller {
+  public:
+    MotionSensor motion;
+    DoorSensor   door;
+    Alarm        alarm;
+    Solenoid     solenoid;
+
+    // --- ARM / DISARM ---
+
+    void armSystem() {
+      Serial.println("Arming... 60 seconds to leave.");
+      exitDelayActive = true;
+      exitStartTime   = millis();
+    }
+
+    void finishArming() {
+      systemArmed      = true;
+      exitDelayActive  = false;
+      solenoid.lock();
+      Serial.println("System armed and locked.");
+    }
+
+    void disarmSystem() {
+      systemArmed       = false;
+      alarmActive       = false;
+      entryDelayActive  = false;
+      motionHandled     = false;
+      lastFaceResult    = FACE_NONE;
+      alarm.off();
+      alarm.clearSecurity();
+      solenoid.unlock();
+      Serial.println("System disarmed and unlocked.");
+    }
+
+    // --- SENSORS ---
+
+    void checkSensors() {
+      bool motionNow = motion.read();
+      bool doorNow   = door.read();
+
+      // Door sensor — trigger once on rising edge only (door opening)
+      if (doorNow && !prevDoorState && !alarmActive && !entryDelayActive) {
+        Serial.println("Door triggered. Checking face...");
+        Serial.println("CHECK_FACE");
+      }
+
+      // PIR — only trigger once per HIGH pulse (PIR stays HIGH ~8s)
+      if (motionNow && !prevMotionState && !motionHandled
+          && !alarmActive && !entryDelayActive) {
+        Serial.println("Motion triggered. Checking face...");
+        Serial.println("CHECK_FACE");
+        motionHandled = true;
+      }
+
+      // Reset handled flags when sensors go LOW again
+      if (!motionNow && prevMotionState) {
+        motionHandled = false;
+      }
+
+      prevMotionState = motionNow;
+      prevDoorState   = doorNow;
+    }
+
+    // --- DELAYS ---
+
+    void handleDelays() {
+      // Exit delay — finish arming after 60s
+      if (exitDelayActive && millis() - exitStartTime >= EXIT_DELAY) {
+        finishArming();
+      }
+
+      // Entry delay — Python has 30s to accept correct PIN
+      if (entryDelayActive && millis() - entryStartTime >= ENTRY_DELAY) {
+        Serial.println("PIN timeout. Triggering alarm.");
+        alarm.on();
+        entryDelayActive = false;
+      }
+    }
+
+    // --- SERIAL (messages from Python) ---
+
+    void handleSerial() {
+      if (!Serial.available()) return;
+
+      String msg = Serial.readStringUntil('\n');
+      msg.trim();
+
+      // Python connected and ready
+      if (msg == "READY") {
+        Serial.println("Python connected.");
+        return;
+      }
+
+      // Python sends ARM when user selects arm from menu
+      if (msg == "ARM") {
+        armSystem();
+        return;
+      }
+
+      // Python disarmed via correct PIN in menu
+      if (msg == "DISARMED") {
+        disarmSystem();
+        return;
+      }
+
+      // Python shut down cleanly
+      if (msg == "SHUTDOWN") {
+        disarmSystem();
+        Serial.println("System shutdown.");
+        return;
+      }
+
+      // --- Face results ---
+
+      if (msg == "FACE_OK") {
+        // Known face — open 30s PIN window
+        lastFaceResult   = FACE_KNOWN;
+        entryDelayActive = true;
+        entryStartTime   = millis();
+        Serial.println("Known face. Enter PIN within 30 seconds.");
+        return;
+      }
+
+      if (msg == "FACE_UNKNOWN") {
+        // Unknown face — trigger alarm immediately
+        lastFaceResult = FACE_UNKNOWN;
+        Serial.println("Unknown face! Triggering alarm.");
+        Serial.println("SAVE_FACE");
+        alarm.on();
+        return;
+      }
+
+      if (msg == "FACE_NONE") {
+        // Sensor tripped but no face seen — treat as threat
+        lastFaceResult = FACE_NONE;
+        Serial.println("No face after trigger. Triggering alarm.");
+        alarm.on();
+        return;
+      }
+
+      // Python PIN entry timed out
+      if (msg == "PIN_TIMEOUT") {
+        Serial.println("PIN timeout (Python). Triggering alarm.");
+        alarm.on();
+        entryDelayActive = false;
+        return;
+      }
+
+      // Intruder image saved
+      if (msg == "SAVED") {
+        Serial.println("Intruder image saved.");
+        return;
+      }
+
+      // Menu option 5 — contact security from Python
+      if (msg == "CONTACT_SECURITY") {
+        alarm.contactSecurity();
+        return;
+      }
+
+      // Training / capture status messages
+      if (msg == "TRAINING")       { Serial.println("Training in progress..."); return; }
+      if (msg == "TRAINING_DONE")  { Serial.println("Training complete.");       return; }
+      if (msg == "TRAIN_FAILED")   { Serial.println("Training failed.");         return; }
+      if (msg == "CAPTURE_READY")  { Serial.println("Capture mode open on PC."); return; }
+      if (msg == "CAPTURE_DONE")   { Serial.println("Capture complete.");        return; }
+      if (msg == "ERROR_NO_MODEL") { Serial.println("No model found.");          return; }
+      if (msg == "ERROR_NO_DATASET"){ Serial.println("No dataset found.");       return; }
+    }
+};
+
+
+// ============================================================
+//  MAIN
+// ============================================================
+
+Controller controller;
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(motionSensorPin, INPUT);        // HC-SR505: no pull-up needed
+  pinMode(doorSensorPin,   INPUT_PULLUP); // RS Pro switch: LOW = triggered
+
+  pinMode(buzzerPin,       OUTPUT);
+  pinMode(solenoidPin,     OUTPUT);
+  pinMode(securityLedPin,  OUTPUT);
+
+  digitalWrite(buzzerPin,      LOW);
+  digitalWrite(solenoidPin,    LOW);
+  digitalWrite(securityLedPin, LOW);
+
+  Serial.println("System ready.");
+  delay(3000);        // wait 3s for Python to connect and send READY
+  systemStarted = true; // start regardless — don't rely on Python READY timing
+}
+
+void loop() {
+  controller.handleSerial();
+
+  // Sensors only run when armed
+  if (systemStarted && systemArmed) {
+    controller.checkSensors();
+  }
+
+  // Delays run whenever system is started — exit delay happens before systemArmed is true
+  if (systemStarted) {
+    controller.handleDelays();
+  }
+
+  delay(100);
+}
