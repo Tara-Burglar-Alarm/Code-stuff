@@ -450,7 +450,8 @@ def print_menu(system_armed):
     print("3. Delete person from database")
     print("4. Change PIN")
     print("5. Contact security company")
-    print("6. Exit")
+    print("6. View intruder log")
+    print("7. Exit")
     print("Select option: ", end="", flush=True)
 
 
@@ -561,6 +562,20 @@ def main():
             contact_security()
 
         elif choice == "6":
+            log_path = os.path.join(base_dir, "intruder_log.txt")
+            if os.path.exists(log_path):
+                print("\n--- Intruder Log ---")
+                with open(log_path, "r") as f:
+                    entries = f.readlines()
+                if entries:
+                    for entry in entries:
+                        print(entry.strip())
+                else:
+                    print("No entries yet.")
+            else:
+                print("No intruder log found.")
+
+        elif choice == "7":
             print("Exiting.")
             if system_armed[0]:
                 disarm_event.set()
@@ -572,7 +587,7 @@ def main():
             break
 
         else:
-            print("Invalid option, please enter 1-6.")
+            print("Invalid option, please enter 1-7.")
 
     print("System shut down.")
 
