@@ -20,7 +20,7 @@ pin_file     = os.path.join(base_dir, "pin.txt")
 os.makedirs(dataset_path, exist_ok=True)
 
 # --- SERIAL ---
-arduino      = serial.Serial('COM6', 9600, timeout=1)
+arduino      = serial.Serial('COM3', 9600, timeout=1)
 serial_lock  = threading.Lock()
 serial_queue = queue.Queue()
 time.sleep(2)
@@ -197,7 +197,7 @@ def run_update_database():
 
     arduino_write(b"CAPTURE_READY\n")
 
-    cap   = cv2.VideoCapture(1)
+    cap   = cv2.VideoCapture(0)
     count = 0
 
     while True:
@@ -279,7 +279,7 @@ def contact_security():
 #  Camera, detection, serial commands only — no imshow/waitKey
 # ============================================================
 
-def recognition_thread(system_armed, disarm_event, frame_queue):
+def recognition_thread(system_armed, disarm_event, frame_queue, pin_requested):
 
     if not os.path.exists(trainer_path):
         print("No trained model found. Please train first.")
@@ -305,7 +305,7 @@ def recognition_thread(system_armed, disarm_event, frame_queue):
     print("Recognition running in background.")
 
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(10, 10))
-    cap   = cv2.VideoCapture(1)
+    cap   = cv2.VideoCapture(0)
 
     checkFaceRequested = False
     saveFaceRequested  = False
@@ -314,18 +314,32 @@ def recognition_thread(system_armed, disarm_event, frame_queue):
     pin_deadline       = 0
     PIN_TIMEOUT        = 30
 
+    # Block CHECK_FACE responses during exit delay (60s after arming)
+    EXIT_DELAY         = 60
+    arm_time           = time.time()
+    exit_delay_active  = True
+
     while not disarm_event.is_set():
 
         # --- READ FROM SERIAL QUEUE ---
         try:
             msg = serial_queue.get_nowait()
             if msg == "CHECK_FACE":
-                if not pin_entry_active:
+                # Ignore sensor triggers during exit delay
+                if not pin_entry_active and not exit_delay_active:
                     checkFaceRequested = True
             elif msg == "SAVE_FACE":
                 saveFaceRequested = True
         except queue.Empty:
             pass
+
+        # --- UPDATE EXIT DELAY ---
+        if exit_delay_active:
+            elapsed   = time.time() - arm_time
+            remaining_exit = int(EXIT_DELAY - elapsed)
+            if elapsed >= EXIT_DELAY:
+                exit_delay_active = False
+                print("System fully armed.")
 
         # --- CAMERA FRAME ---
         ret, frame = cap.read()
@@ -373,7 +387,8 @@ def recognition_thread(system_armed, disarm_event, frame_queue):
                 arduino_write(b"FACE_OK\n")
                 pin_entry_active = True
                 pin_deadline     = time.time() + PIN_TIMEOUT
-                print(f"Known face detected. Enter PIN in menu within {PIN_TIMEOUT}s to disarm.")
+                pin_requested.set()  # signal main thread to ask for PIN
+                print(f"Known face detected. Enter PIN within {PIN_TIMEOUT}s to disarm.")
             elif system_state in ("UNKNOWN", "MULTI_FACE"):
                 arduino_write(b"FACE_UNKNOWN\n")
             else:
@@ -394,6 +409,7 @@ def recognition_thread(system_armed, disarm_event, frame_queue):
                 print("PIN timeout. Triggering alarm.")
                 arduino_write(b"PIN_TIMEOUT\n")
                 pin_entry_active = False
+                pin_requested.clear()
 
         # --- SAVE INTRUDER ---
         if saveFaceRequested and last_frame is not None:
@@ -407,8 +423,12 @@ def recognition_thread(system_armed, disarm_event, frame_queue):
             saveFaceRequested = False
 
         # --- STATUS OVERLAY ---
-        cv2.putText(frame, "ARMED", (10, frame.shape[0] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        if exit_delay_active:
+            cv2.putText(frame, f"Leaving: {remaining_exit}s", (10, frame.shape[0] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
+        else:
+            cv2.putText(frame, "ARMED", (10, frame.shape[0] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
         # --- SEND FRAME TO DISPLAY THREAD ---
         if frame_queue.full():
@@ -448,6 +468,7 @@ def main():
 
     system_armed  = [False]
     disarm_event  = threading.Event()
+    pin_requested = threading.Event()  # set by recognition thread when known face detected
     recog_thread  = [None]
     frame_queue   = queue.Queue(maxsize=2)
 
@@ -471,6 +492,28 @@ def main():
 
     # --- MAIN MENU LOOP (main thread — input() safe here) ---
     while True:
+
+        # If recognition thread flagged a known face, ask for PIN immediately
+        if pin_requested.is_set():
+            print("\n--- KNOWN FACE DETECTED ---")
+            print(f"Enter PIN to disarm (or wait for timeout): ", end="", flush=True)
+            entered = input().strip()
+            pin = load_pin()
+            if entered == pin:
+                system_armed[0] = False
+                pin_requested.clear()
+                disarm_event.set()
+                if recog_thread[0]:
+                    recog_thread[0].join(timeout=3)
+                disarm_event.clear()
+                recog_thread[0] = None
+                arduino_write(b"DISARMED\n")
+                print("Correct PIN. System disarmed.")
+            else:
+                print("Incorrect PIN.")
+                # Don't clear pin_requested — let it keep asking until timeout
+            continue
+
         print_menu(system_armed)
         choice = input().strip()
 
@@ -498,7 +541,7 @@ def main():
                 disarm_event.clear()
                 t = threading.Thread(
                     target=recognition_thread,
-                    args=(system_armed, disarm_event, frame_queue),
+                    args=(system_armed, disarm_event, frame_queue, pin_requested),
                     daemon=True
                 )
                 recog_thread[0] = t
