@@ -22,7 +22,7 @@ os.makedirs(dataset_path, exist_ok=True)
 # --- SERIAL ---
 arduino      = serial.Serial('COM6', 9600, timeout=1)
 serial_lock  = threading.Lock()
-serial_queue = queue.Queue()   # all incoming Arduino messages go here
+serial_queue = queue.Queue()
 time.sleep(2)
 print("Connected to Arduino.")
 
@@ -33,37 +33,51 @@ while arduino.in_waiting:
 def arduino_write(msg):
     """Thread-safe serial write."""
     with serial_lock:
-        (msg)
+        arduino.write(msg)
+    print(f"[SENT] {msg}")
 
 
 # ============================================================
 #  SERIAL READER THREAD
 #  Only thread that ever calls arduino.readline()
-#  Puts every message into serial_queue for consumption elsewhere
 # ============================================================
 
 def serial_reader_thread(stop_event):
-    """
-    Dedicated thread that reads all incoming Arduino messages
-    and puts them into serial_queue. Nothing else reads serial directly.
-    This prevents the recognition thread and menu thread from
-    accidentally consuming each other's messages.
-    """
     while not stop_event.is_set():
         try:
             if arduino.in_waiting:
                 raw = arduino.readline()
-                msg = ""
                 try:
                     msg = raw.decode().strip()
                 except Exception:
-                    pass
+                    msg = ""
                 if msg:
                     serial_queue.put(msg)
+                    print(f"[Arduino] {msg}")
             else:
                 time.sleep(0.01)
         except Exception:
             time.sleep(0.05)
+
+
+# ============================================================
+#  DISPLAY THREAD
+#  Runs imshow/waitKey — separate from main so input() works freely
+# ============================================================
+
+def display_thread(frame_queue, stop_event):
+    while not stop_event.is_set():
+        try:
+            frame = frame_queue.get(timeout=0.05)
+            if frame is None:
+                cv2.destroyAllWindows()
+            else:
+                cv2.imshow("Security Camera", frame)
+                if cv2.waitKey(1) == 27:
+                    cv2.destroyAllWindows()
+        except queue.Empty:
+            pass
+    cv2.destroyAllWindows()
 
 
 # ============================================================
@@ -262,10 +276,7 @@ def contact_security():
 
 # ============================================================
 #  RECOGNITION THREAD
-#  - Reads frames from camera
-#  - Runs face detection and recognition
-#  - Reads commands from serial_queue (not arduino directly)
-#  - Puts annotated frames into frame_queue for main thread display
+#  Camera, detection, serial commands only — no imshow/waitKey
 # ============================================================
 
 def recognition_thread(system_armed, disarm_event, frame_queue):
@@ -305,25 +316,16 @@ def recognition_thread(system_armed, disarm_event, frame_queue):
 
     while not disarm_event.is_set():
 
-        # --- READ FROM SERIAL QUEUE (not arduino directly) ---
-        msg = ""
+        # --- READ FROM SERIAL QUEUE ---
         try:
             msg = serial_queue.get_nowait()
-        except queue.Empty:
-            pass
-
-        if msg:
             if msg == "CHECK_FACE":
-                # Ignore new triggers while PIN window is open
                 if not pin_entry_active:
                     checkFaceRequested = True
             elif msg == "SAVE_FACE":
                 saveFaceRequested = True
-            elif msg == "ALARM_ON":
-                print("[Arduino] Alarm triggered.")
-            else:
-                # Print all other Arduino messages to terminal for visibility
-                print(f"[Arduino] {msg}")
+        except queue.Empty:
+            pass
 
         # --- CAMERA FRAME ---
         ret, frame = cap.read()
@@ -408,7 +410,7 @@ def recognition_thread(system_armed, disarm_event, frame_queue):
         cv2.putText(frame, "ARMED", (10, frame.shape[0] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-        # --- SEND FRAME TO DISPLAY QUEUE ---
+        # --- SEND FRAME TO DISPLAY THREAD ---
         if frame_queue.full():
             try:
                 frame_queue.get_nowait()
@@ -422,59 +424,84 @@ def recognition_thread(system_armed, disarm_event, frame_queue):
 
 
 # ============================================================
-#  MENU THREAD
+#  MAIN — all input() calls live here (Windows requirement)
 # ============================================================
 
-def menu_thread(system_armed, disarm_event, recog_threads, stop_menu_event):
+def print_menu(system_armed):
+    status = "ARMED" if system_armed[0] else "DISARMED"
+    print(f"\n--- Security System Menu [{status}] ---")
+    print("1. Arm / Disarm system")
+    print("2. Update database (add person + retrain)")
+    print("3. Delete person from database")
+    print("4. Change PIN")
+    print("5. Contact security company")
+    print("6. Exit")
+    print("Select option: ", end="", flush=True)
 
-    def print_menu():
-        status = "ARMED" if system_armed[0] else "DISARMED"
-        print(f"\n--- Security System Menu [{status}] ---")
-        print("1. Arm / Disarm system")
-        print("2. Update database (add person + retrain)")
-        print("3. Delete person from database")
-        print("4. Change PIN")
-        print("5. Contact security company")
-        print("6. Exit")
-        print("Select option: ", end="", flush=True)
 
-    while not stop_menu_event.is_set():
-        print_menu()
+def main():
+    # Step 1 — login on main thread
+    login()
+
+    # Step 2 — signal Arduino
+    arduino_write(b"READY\n")
+
+    system_armed  = [False]
+    disarm_event  = threading.Event()
+    recog_thread  = [None]
+    frame_queue   = queue.Queue(maxsize=2)
+
+    # Start serial reader thread
+    serial_stop = threading.Event()
+    s_thread = threading.Thread(
+        target=serial_reader_thread,
+        args=(serial_stop,),
+        daemon=True
+    )
+    s_thread.start()
+
+    # Start display thread
+    display_stop = threading.Event()
+    d_thread = threading.Thread(
+        target=display_thread,
+        args=(frame_queue, display_stop),
+        daemon=True
+    )
+    d_thread.start()
+
+    # --- MAIN MENU LOOP (main thread — input() safe here) ---
+    while True:
+        print_menu(system_armed)
         choice = input().strip()
-
-        if stop_menu_event.is_set():
-            break
 
         if choice == "1":
             if system_armed[0]:
+                # Disarm
                 pin     = load_pin()
                 entered = input("Enter PIN to disarm: ").strip()
                 if entered == pin:
                     system_armed[0] = False
                     disarm_event.set()
-                    if recog_threads[0]:
-                        recog_threads[0].join(timeout=3)
+                    if recog_thread[0]:
+                        recog_thread[0].join(timeout=3)
                     disarm_event.clear()
-                    recog_threads[0] = None
+                    recog_thread[0] = None
                     arduino_write(b"DISARMED\n")
                     print("System disarmed.")
                 else:
                     print("Incorrect PIN.")
             else:
+                # Arm
                 print("Arming system. You have 60 seconds to leave.")
                 arduino_write(b"ARM\n")
                 system_armed[0] = True
-
-                fq = queue.Queue(maxsize=2)
-                recog_threads[1] = fq
-
                 disarm_event.clear()
                 t = threading.Thread(
                     target=recognition_thread,
-                    args=(system_armed, disarm_event, fq),
+                    args=(system_armed, disarm_event, frame_queue),
                     daemon=True
                 )
-                recog_threads[0] = t
+                recog_thread[0] = t
                 t.start()
 
         elif choice == "2":
@@ -499,69 +526,16 @@ def menu_thread(system_armed, disarm_event, recog_threads, stop_menu_event):
             print("Exiting.")
             if system_armed[0]:
                 disarm_event.set()
-                if recog_threads[0]:
-                    recog_threads[0].join(timeout=3)
+                if recog_thread[0]:
+                    recog_thread[0].join(timeout=3)
             arduino_write(b"SHUTDOWN\n")
-            stop_menu_event.set()
+            serial_stop.set()
+            display_stop.set()
             break
 
         else:
             print("Invalid option, please enter 1-6.")
 
-
-# ============================================================
-#  MAIN — display loop runs here (OpenCV requirement)
-# ============================================================
-
-def main():
-    login()
-    arduino_write(b"READY\n")
-
-    system_armed    = [False]
-    disarm_event    = threading.Event()
-    stop_menu_event = threading.Event()
-    recog_threads   = [None, None]  # [Thread, frame_queue]
-
-    # Start serial reader — only thread that reads from arduino
-    serial_stop = threading.Event()
-    s_thread = threading.Thread(
-        target=serial_reader_thread,
-        args=(serial_stop,),
-        daemon=True
-    )
-    s_thread.start()
-
-    # Start menu thread
-    m_thread = threading.Thread(
-        target=menu_thread,
-        args=(system_armed, disarm_event, recog_threads, stop_menu_event),
-        daemon=True
-    )
-    m_thread.start()
-
-    # --- MAIN DISPLAY LOOP ---
-    while not stop_menu_event.is_set():
-        fq = recog_threads[1]
-
-        if fq is not None:
-            try:
-                frame = fq.get(timeout=0.05)
-                if frame is None:
-                    recog_threads[1] = None
-                    cv2.destroyAllWindows()
-                else:
-                    cv2.imshow("Security Camera", frame)
-                    if cv2.waitKey(1) == 27:
-                        cv2.destroyAllWindows()
-                        recog_threads[1] = None
-            except queue.Empty:
-                pass
-        else:
-            time.sleep(0.05)
-
-    cv2.destroyAllWindows()
-    serial_stop.set()
-    m_thread.join(timeout=3)
     print("System shut down.")
 
 
