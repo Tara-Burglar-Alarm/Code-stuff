@@ -308,11 +308,11 @@ def recognition_thread(system_armed, disarm_event, frame_queue, pin_requested):
     cap   = cv2.VideoCapture(0)
 
     checkFaceRequested = False
-    saveFaceRequested  = False
-    last_frame         = None
     pin_entry_active   = False
     pin_deadline       = 0
     PIN_TIMEOUT        = 30
+    last_check_time    = 0
+    SENSOR_COOLDOWN    = 8
 
     # Block CHECK_FACE responses during exit delay (60s after arming)
     EXIT_DELAY         = 60
@@ -325,11 +325,12 @@ def recognition_thread(system_armed, disarm_event, frame_queue, pin_requested):
         try:
             msg = serial_queue.get_nowait()
             if msg == "CHECK_FACE":
-                # Ignore sensor triggers during exit delay
-                if not pin_entry_active and not exit_delay_active:
+                now = time.time()
+                if (not pin_entry_active
+                        and not exit_delay_active
+                        and now - last_check_time >= SENSOR_COOLDOWN):
                     checkFaceRequested = True
-            elif msg == "SAVE_FACE":
-                saveFaceRequested = True
+                    last_check_time    = now
         except queue.Empty:
             pass
 
@@ -345,8 +346,6 @@ def recognition_thread(system_armed, disarm_event, frame_queue, pin_requested):
         ret, frame = cap.read()
         if not ret:
             break
-
-        last_frame = frame.copy()
 
         gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray  = clahe.apply(gray)
@@ -387,10 +386,17 @@ def recognition_thread(system_armed, disarm_event, frame_queue, pin_requested):
                 arduino_write(b"FACE_OK\n")
                 pin_entry_active = True
                 pin_deadline     = time.time() + PIN_TIMEOUT
-                pin_requested.set()  # signal main thread to ask for PIN
+                pin_requested.set()
                 print(f"Known face detected. Enter PIN within {PIN_TIMEOUT}s to disarm.")
             elif system_state in ("UNKNOWN", "MULTI_FACE"):
                 arduino_write(b"FACE_UNKNOWN\n")
+                # Log timestamp to file and send to Arduino
+                ts       = time.strftime("%Y-%m-%d %H:%M:%S")
+                log_path = os.path.join(base_dir, "intruder_log.txt")
+                with open(log_path, "a") as f:
+                    f.write(f"{ts} - Unknown face detected\n")
+                print(f"Intruder logged: {ts}")
+                arduino_write(f"LOG:{ts}\n".encode())
             else:
                 arduino_write(b"FACE_NONE\n")
             checkFaceRequested = False
@@ -410,17 +416,6 @@ def recognition_thread(system_armed, disarm_event, frame_queue, pin_requested):
                 arduino_write(b"PIN_TIMEOUT\n")
                 pin_entry_active = False
                 pin_requested.clear()
-
-        # --- SAVE INTRUDER ---
-        if saveFaceRequested and last_frame is not None:
-            intruder_folder = os.path.join(base_dir, "intruders")
-            os.makedirs(intruder_folder, exist_ok=True)
-            timestamp = int(time.time())
-            filename  = os.path.join(intruder_folder, f"intruder_{timestamp}.jpg")
-            cv2.imwrite(filename, last_frame)
-            print(f"Intruder saved: {filename}")
-            arduino_write(b"SAVED\n")
-            saveFaceRequested = False
 
         # --- STATUS OVERLAY ---
         if exit_delay_active:
